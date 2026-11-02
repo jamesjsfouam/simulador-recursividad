@@ -1,0 +1,927 @@
+import React, { useState, useEffect, useMemo, useCallback, useRef } from "react";
+import {
+  Play,
+  Pause,
+  ChevronLeft,
+  ChevronRight,
+  RotateCcw,
+  Layers,
+  GitBranch,
+  Code,
+  Info,
+  Eye,
+  EyeOff,
+  Lightbulb,
+  ArrowDown,
+  ArrowUp,
+  CornerDownLeft,
+  Flag,
+  Check,
+  Scale,
+} from "lucide-react";
+
+/* ─────────────────────────── Algoritmos ─────────────────────────── */
+
+const ALGORITHMS = {
+  factorial: {
+    label: "Factorial",
+    fn: "factorial",
+    short: "fact",
+    min: 0,
+    max: 8,
+    initial: 4,
+    formula: "n! = n × (n − 1)!",
+    blurb: "Una sola llamada recursiva por nivel: la pila crece y se vacía en línea recta.",
+    code: [
+      "function factorial(n) {",
+      "  if (n <= 1) {",
+      "    return 1;",
+      "  }",
+      "  const sub = factorial(n - 1);",
+      "  return n * sub;",
+      "}",
+    ],
+    lines: { enter: 1, check: 2, base: 3, calls: [5], ret: 6 },
+    locals: ["sub"],
+    children: (n) => (n > 1 ? [n - 1] : []),
+    base: () => 1,
+    combine: (n, [sub]) => ({ value: n * sub, expr: `${n} × ${sub}` }),
+  },
+  fibonacci: {
+    label: "Fibonacci",
+    fn: "fib",
+    short: "fib",
+    min: 0,
+    max: 7,
+    initial: 4,
+    formula: "fib(n) = fib(n − 1) + fib(n − 2)",
+    blurb: "Dos llamadas por nivel: el árbol se ramifica y muchos subproblemas se repiten.",
+    code: [
+      "function fib(n) {",
+      "  if (n <= 1) {",
+      "    return n;",
+      "  }",
+      "  const a = fib(n - 1);",
+      "  const b = fib(n - 2);",
+      "  return a + b;",
+      "}",
+    ],
+    lines: { enter: 1, check: 2, base: 3, calls: [5, 6], ret: 7 },
+    locals: ["a", "b"],
+    children: (n) => (n > 1 ? [n - 1, n - 2] : []),
+    base: (n) => n,
+    combine: (n, [a, b]) => ({ value: a + b, expr: `${a} + ${b}` }),
+  },
+};
+
+/* ──────────────── Traza: ejecuta el algoritmo y guarda cada paso ──────────────── */
+
+function buildTrace(algo, n) {
+  // 1) Árbol completo de llamadas (en orden de ejecución / preorden)
+  const nodes = [];
+  const grow = (k, parent, depth) => {
+    const id = nodes.length;
+    nodes.push({ id, n: k, parent, depth, children: [] });
+    if (parent !== null) nodes[parent].children.push(id);
+    algo.children(k).forEach((c) => grow(c, id, depth + 1));
+  };
+  grow(n, null, 0);
+
+  // 2) Simulación paso a paso
+  const L = algo.lines;
+  const status = nodes.map(() => "pending");
+  const values = nodes.map(() => null);
+  const stack = [];
+  const steps = [];
+  let calls = 0;
+  let maxDepth = 0;
+  const name = (k) => `${algo.fn}(${k})`;
+
+  const snap = (kind, line, title, detail, extra = {}) => {
+    if (stack.length) stack[stack.length - 1].pc = line;
+    steps.push({
+      kind,
+      line,
+      title,
+      detail,
+      status: [...status],
+      values: [...values],
+      stack: stack.map((f) => ({ ...f, locals: { ...f.locals } })),
+      calls,
+      maxDepth,
+      ...extra,
+    });
+  };
+
+  const finish = (frame, id, value) => {
+    frame.ret = value;
+    frame.state = "returning";
+    status[id] = "returned";
+    values[id] = value;
+  };
+
+  const run = (id) => {
+    const { n: k, children } = nodes[id];
+    const frame = { id, n: k, locals: {}, ret: null, state: "active", pc: L.enter };
+    stack.push(frame);
+    status[id] = "active";
+    calls++;
+    maxDepth = Math.max(maxDepth, stack.length);
+    snap(
+      "call",
+      L.enter,
+      `Entra a ${name(k)}`,
+      `Se apila un marco nuevo con n = ${k}. Ahora hay ${stack.length} ${
+        stack.length === 1 ? "llamada activa" : "llamadas activas"
+      } en la pila.`,
+      { changed: "n" }
+    );
+
+    const isBase = children.length === 0;
+    snap(
+      "check",
+      L.check,
+      `¿${k} <= 1? → ${isBase ? "Sí" : "No"}`,
+      isBase
+        ? `n = ${k} es un caso base: la respuesta se conoce sin volver a llamar a la función.`
+        : `n = ${k} no es caso base: hay que partir el problema en subproblemas más pequeños.`
+    );
+
+    let value;
+    if (isBase) {
+      value = algo.base(k);
+      finish(frame, id, value);
+      snap(
+        "return",
+        L.base,
+        `${name(k)} devuelve ${value}`,
+        `Caso base resuelto. El valor ${value} viaja de vuelta a quien hizo la llamada y este marco se desapila.`,
+        { changed: "ret" }
+      );
+    } else {
+      const got = [];
+      children.forEach((cid, i) => {
+        const ck = nodes[cid].n;
+        const v = algo.locals[i];
+        snap(
+          "pre-call",
+          L.calls[i],
+          `${name(k)} llama a ${name(ck)}`,
+          `${name(k)} se pausa en la línea ${L.calls[i]}: no puede continuar hasta conocer el valor de ${v}.`,
+          { next: cid }
+        );
+        frame.state = "waiting";
+        status[id] = "waiting";
+        const r = run(cid);
+        frame.state = "active";
+        status[id] = "active";
+        frame.locals[v] = r;
+        got.push(r);
+        snap(
+          "resume",
+          L.calls[i],
+          `${v} = ${r}`,
+          `${name(ck)} terminó y se desapiló. ${name(k)} vuelve a la cima de la pila y guarda ${v} = ${r}.`,
+          { changed: v }
+        );
+      });
+      const res = algo.combine(k, got);
+      value = res.value;
+      finish(frame, id, value);
+      snap(
+        "return",
+        L.ret,
+        `${name(k)} devuelve ${res.expr} = ${value}`,
+        `Con los resultados de sus subllamadas, ${name(k)} calcula ${res.expr} = ${value} y se lo entrega a quien la llamó.`,
+        { changed: "ret" }
+      );
+    }
+    stack.pop();
+    return value;
+  };
+
+  snap(
+    "start",
+    null,
+    "Listo para empezar",
+    `Pulsa «Siguiente» para llamar a ${name(n)}. La pila de llamadas está vacía.`,
+    { next: 0 }
+  );
+  const result = run(0);
+  snap(
+    "done",
+    null,
+    `Resultado: ${name(n)} = ${result}`,
+    `Todas las llamadas devolvieron su valor y la pila volvió a quedar vacía: ${calls} llamadas en total, profundidad máxima ${maxDepth}.`
+  );
+
+  return { nodes, steps, result };
+}
+
+/* Coloca hojas de izquierda a derecha y centra cada padre sobre sus hijos */
+function layoutTree(nodes) {
+  const pos = {};
+  let leaf = 0;
+  let depth = 0;
+  const place = (id) => {
+    const nd = nodes[id];
+    depth = Math.max(depth, nd.depth + 1);
+    if (!nd.children.length) {
+      pos[id] = { x: leaf++, y: nd.depth };
+      return;
+    }
+    nd.children.forEach(place);
+    const xs = nd.children.map((c) => pos[c].x);
+    pos[id] = { x: (Math.min(...xs) + Math.max(...xs)) / 2, y: nd.depth };
+  };
+  place(0);
+  return { pos, leaves: leaf, depth };
+}
+
+/* ─────────────────────────── Paleta didáctica ─────────────────────────── */
+
+const KIND = {
+  start: {
+    icon: Flag,
+    label: "Inicio",
+    tone: "slate",
+    tip: "Una función recursiva es la que se llama a sí misma con una versión más pequeña del problema.",
+  },
+  call: {
+    icon: ArrowDown,
+    label: "Llamada",
+    tone: "yellow",
+    tip: "Cada llamada tiene su propio marco con su propia copia de n: las llamadas no se pisan entre sí.",
+  },
+  check: {
+    icon: Scale,
+    label: "¿Caso base?",
+    tone: "yellow",
+    tip: "Sin caso base la recursión nunca terminaría y la pila se desbordaría (stack overflow).",
+  },
+  "pre-call": {
+    icon: ArrowDown,
+    label: "Llamada recursiva",
+    tone: "yellow",
+    tip: "La función actual queda en espera; su estado (variables y línea) se conserva en la pila.",
+  },
+  resume: {
+    icon: ArrowUp,
+    label: "Reanuda",
+    tone: "sky",
+    tip: "Al desapilarse la llamada hija, el control vuelve exactamente a la línea donde se quedó la madre.",
+  },
+  return: {
+    icon: CornerDownLeft,
+    label: "Retorno",
+    tone: "emerald",
+    tip: "Los valores suben desde los casos base hasta la llamada original: la «vuelta» de la recursión.",
+  },
+  done: {
+    icon: Check,
+    label: "Fin",
+    tone: "emerald",
+    tip: "La primera llamada en entrar es la última en salir: la pila funciona como LIFO.",
+  },
+};
+
+const TONE = {
+  slate: {
+    badge: "bg-slate-700 text-slate-100",
+    line: "bg-slate-500/15 border-slate-400",
+    ring: "border-slate-700",
+  },
+  yellow: {
+    badge: "bg-yellow-400 text-slate-900",
+    line: "bg-yellow-400/15 border-yellow-400",
+    ring: "border-yellow-400/40",
+  },
+  sky: {
+    badge: "bg-sky-400 text-slate-900",
+    line: "bg-sky-400/15 border-sky-400",
+    ring: "border-sky-400/40",
+  },
+  emerald: {
+    badge: "bg-emerald-400 text-slate-900",
+    line: "bg-emerald-400/15 border-emerald-400",
+    ring: "border-emerald-400/40",
+  },
+};
+
+const NODE = {
+  pending: { fill: "#1e293b", stroke: "#475569", text: "#94a3b8", sub: "#64748b", label: "pendiente" },
+  active: { fill: "#facc15", stroke: "#fde047", text: "#0f172a", sub: "#422006", label: "activa" },
+  waiting: { fill: "#0c4a6e", stroke: "#38bdf8", text: "#e0f2fe", sub: "#7dd3fc", label: "en espera" },
+  returned: { fill: "#059669", stroke: "#34d399", text: "#ecfdf5", sub: "#d1fae5", label: "" },
+};
+
+const EDGE = { pending: "#334155", active: "#facc15", waiting: "#38bdf8", returned: "#34d399" };
+
+const LEGEND = [
+  { key: "pending", label: "Pendiente", dot: "bg-slate-600", tip: "Llamada que todavía no se ha hecho." },
+  { key: "active", label: "Activa", dot: "bg-yellow-400", tip: "La llamada en la cima de la pila: es la que se está ejecutando." },
+  { key: "waiting", label: "En espera", dot: "bg-sky-400", tip: "Llamada pausada esperando el resultado de una subllamada." },
+  { key: "returned", label: "Retornó", dot: "bg-emerald-400", tip: "Llamada terminada: ya devolvió su valor." },
+];
+
+const SPEEDS = [0.5, 1, 2, 4];
+
+/* ─────────────────────────── Piezas de UI ─────────────────────────── */
+
+function Tip({ text, children, below = false }) {
+  return (
+    <span className="group relative inline-flex">
+      {children}
+      <span
+        role="tooltip"
+        className={`pointer-events-none absolute left-1/2 z-50 w-max max-w-[240px] -translate-x-1/2 whitespace-normal rounded-lg border border-slate-700 bg-slate-950 px-2.5 py-1.5 text-xs font-normal normal-case tracking-normal text-slate-200 opacity-0 shadow-xl transition-opacity duration-150 group-hover:opacity-100 group-focus-within:opacity-100 ${
+          below ? "top-full mt-2" : "bottom-full mb-2"
+        }`}
+      >
+        {text}
+      </span>
+    </span>
+  );
+}
+
+function Panel({ icon: Icon, title, tip, right, children, className = "" }) {
+  return (
+    <section className={`flex min-w-0 flex-col rounded-2xl border border-slate-800 bg-slate-900/70 p-4 ${className}`}>
+      <header className="mb-3 flex items-center gap-2">
+        <Icon className="h-4 w-4 text-slate-400" />
+        <h2 className="text-xs font-semibold uppercase tracking-wider text-slate-300">{title}</h2>
+        {tip && (
+          <Tip text={tip} below>
+            <Info className="h-3.5 w-3.5 cursor-help text-slate-500 hover:text-slate-300" />
+          </Tip>
+        )}
+        {right && <div className="ml-auto">{right}</div>}
+      </header>
+      {children}
+    </section>
+  );
+}
+
+function CtrlButton({ onClick, disabled, children, primary = false }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={disabled}
+      className={`inline-flex items-center gap-1.5 rounded-xl px-3 py-2 text-sm font-medium transition focus:outline-none focus-visible:ring-2 focus-visible:ring-yellow-300 disabled:cursor-not-allowed disabled:opacity-40 ${
+        primary
+          ? "bg-yellow-400 text-slate-900 hover:bg-yellow-300"
+          : "border border-slate-700 bg-slate-800 text-slate-200 hover:bg-slate-700"
+      }`}
+    >
+      {children}
+    </button>
+  );
+}
+
+function Stat({ label, value, tip, accent = "text-slate-100" }) {
+  return (
+    <Tip text={tip}>
+      <div className="cursor-help rounded-xl border border-slate-800 bg-slate-900/70 px-3 py-2">
+        <div className="text-[10px] uppercase tracking-wider text-slate-500">{label}</div>
+        <div className={`font-mono text-lg font-semibold leading-tight ${accent}`}>{value}</div>
+      </div>
+    </Tip>
+  );
+}
+
+/* ─────────────────────────── Paneles ─────────────────────────── */
+
+function CodePanel({ algo, step }) {
+  const tone = TONE[KIND[step.kind].tone];
+  const paused = new Set(step.stack.filter((f) => f.state === "waiting").map((f) => f.pc));
+  return (
+    <div className="overflow-x-auto rounded-xl border border-slate-800 bg-slate-950/70 py-2 font-mono text-[13px] leading-6">
+      {algo.code.map((text, idx) => {
+        const ln = idx + 1;
+        const current = step.line === ln;
+        return (
+          <div
+            key={ln}
+            className={`flex items-center border-l-4 pr-3 transition-colors duration-200 ${
+              current ? tone.line : "border-transparent"
+            }`}
+          >
+            <span className="flex w-10 shrink-0 items-center justify-end gap-1 pr-3 text-slate-600 select-none">
+              {paused.has(ln) && !current && (
+                <Tip text="Aquí hay llamadas en espera, pausadas en esta línea.">
+                  <span className="h-1.5 w-1.5 rounded-full bg-sky-400" />
+                </Tip>
+              )}
+              {current ? <span className="text-slate-200">▶</span> : ln}
+            </span>
+            <span className={`whitespace-pre ${current ? "text-white" : "text-slate-400"}`}>{text}</span>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function VariablesPanel({ algo, step }) {
+  const top = step.stack[step.stack.length - 1];
+  if (!top) {
+    return (
+      <p className="rounded-xl border border-dashed border-slate-700 p-3 text-sm text-slate-500">
+        {step.kind === "done"
+          ? "No hay ninguna llamada en ejecución: todas terminaron."
+          : "Aún no hay ninguna llamada en ejecución."}
+      </p>
+    );
+  }
+  const rows = [
+    { key: "n", label: "n", value: top.n, hint: "parámetro" },
+    ...algo.locals.map((v) => ({ key: v, label: v, value: top.locals[v], hint: "variable local" })),
+    { key: "ret", label: "return", value: top.ret, hint: "valor devuelto" },
+  ];
+  return (
+    <div>
+      <div className="mb-2 text-xs text-slate-500">
+        Marco de <span className="font-mono text-yellow-300">{algo.fn}({top.n})</span> (cima de la pila)
+      </div>
+      <table className="w-full text-sm">
+        <tbody>
+          {rows.map((r) => {
+            const set = r.value !== undefined && r.value !== null;
+            const hot = step.changed === r.key;
+            return (
+              <tr key={r.key} className={`transition-colors ${hot ? "bg-yellow-400/10" : ""}`}>
+                <td className="py-1 pl-2 font-mono text-slate-200">{r.label}</td>
+                <td className="py-1 text-xs text-slate-500">{r.hint}</td>
+                <td className="py-1 pr-2 text-right font-mono">
+                  {set ? (
+                    <span className={r.key === "ret" ? "font-semibold text-emerald-300" : hot ? "text-yellow-300" : "text-slate-100"}>
+                      {r.value}
+                    </span>
+                  ) : (
+                    <span className="italic text-slate-600">sin asignar</span>
+                  )}
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function CallStack({ algo, step }) {
+  const frames = [...step.stack].reverse(); // cima primero
+  const STYLE = {
+    active: { box: "border-yellow-400 bg-yellow-400/10", chip: "bg-yellow-400 text-slate-900", text: "ejecutando" },
+    waiting: { box: "border-sky-500/60 bg-sky-500/5", chip: "bg-sky-500/20 text-sky-300", text: "en espera" },
+    returning: { box: "border-emerald-400 bg-emerald-500/10", chip: "bg-emerald-400 text-slate-900", text: "retornando" },
+  };
+  return (
+    <div className="flex flex-col gap-2">
+      {frames.length === 0 && (
+        <div className="rounded-xl border border-dashed border-slate-700 p-4 text-center text-sm text-slate-500">
+          Pila vacía
+        </div>
+      )}
+      {frames.map((f, idx) => {
+        const s = STYLE[f.state];
+        return (
+          <div key={f.id} className={`rs-in rounded-xl border p-3 transition-colors duration-300 ${s.box}`}>
+            <div className="flex items-center gap-2">
+              <span className="font-mono text-sm font-semibold text-slate-100">
+                {algo.fn}(n = {f.n})
+              </span>
+              {idx === 0 && (
+                <span className="rounded bg-slate-700 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-slate-200">
+                  cima
+                </span>
+              )}
+              <span className={`ml-auto rounded-full px-2 py-0.5 text-[11px] font-medium ${s.chip}`}>{s.text}</span>
+            </div>
+            <div className="mt-2 flex flex-wrap gap-1.5 font-mono text-xs">
+              {algo.locals.map((v) => (
+                <span key={v} className="rounded-md bg-slate-950/60 px-2 py-0.5 text-slate-300">
+                  {v} = {f.locals[v] ?? <span className="text-slate-600">?</span>}
+                </span>
+              ))}
+              {f.state === "returning" && (
+                <span className="rounded-md bg-emerald-400/20 px-2 py-0.5 font-semibold text-emerald-300">↩ {f.ret}</span>
+              )}
+            </div>
+            {f.state === "waiting" && (
+              <div className="mt-1.5 text-[11px] text-sky-300/80">pausada en la línea {f.pc}</div>
+            )}
+          </div>
+        );
+      })}
+      <div className="rounded-xl border border-slate-800 bg-slate-950/50 px-3 py-2 font-mono text-xs text-slate-500">
+        main() — programa principal
+      </div>
+    </div>
+  );
+}
+
+function RecursionTree({ algo, nodes, step, showFuture }) {
+  const ref = useRef(null);
+  const { pos, leaves, depth } = useMemo(() => layoutTree(nodes), [nodes]);
+  const SX = leaves > 10 ? 66 : 78;
+  const SY = 76;
+  const PW = 60;
+  const PH = 38;
+  const PAD = 14;
+  const W = PAD * 2 + Math.max(leaves, 1) * SX;
+  const H = PAD * 2 + (depth - 1) * SY + PH;
+  const cx = (id) => PAD + pos[id].x * SX + SX / 2;
+  const cy = (id) => PAD + pos[id].y * SY + PH / 2;
+  const visible = (id) => showFuture || step.status[id] !== "pending" || step.next === id;
+
+  const focus = step.stack.length ? step.stack[step.stack.length - 1].id : step.next ?? 0;
+  useEffect(() => {
+    const el = ref.current;
+    if (!el || pos[focus] === undefined) return;
+    el.scrollTo({
+      left: cx(focus) - el.clientWidth / 2,
+      top: cy(focus) - el.clientHeight / 2,
+      behavior: "smooth",
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [focus, nodes]);
+
+  return (
+    <div ref={ref} className="max-h-[480px] min-h-[220px] overflow-auto rounded-xl border border-slate-800 bg-slate-950/60">
+      <svg width={W} height={H} viewBox={`0 0 ${W} ${H}`} className="mx-auto block">
+        {nodes
+          .filter((nd) => nd.parent !== null && visible(nd.id))
+          .map((nd) => {
+            const st = step.status[nd.id];
+            return (
+              <line
+                key={`e${nd.id}`}
+                x1={cx(nd.parent)}
+                y1={cy(nd.parent) + PH / 2}
+                x2={cx(nd.id)}
+                y2={cy(nd.id) - PH / 2}
+                stroke={EDGE[st]}
+                strokeWidth={st === "pending" ? 1.5 : 2.5}
+                strokeDasharray={st === "pending" ? "4 4" : undefined}
+                style={{ transition: "stroke .3s" }}
+              />
+            );
+          })}
+        {nodes.filter((nd) => visible(nd.id)).map((nd) => {
+          const st = step.status[nd.id];
+          const c = NODE[st];
+          const isNext = step.next === nd.id;
+          const x = cx(nd.id);
+          const y = cy(nd.id);
+          const val = step.values[nd.id];
+          const title =
+            st === "returned"
+              ? `${algo.fn}(${nd.n}) devolvió ${val}`
+              : isNext
+              ? `${algo.fn}(${nd.n}) es la próxima llamada`
+              : `${algo.fn}(${nd.n}): ${LEGEND.find((l) => l.key === st).tip}`;
+          return (
+            <g key={nd.id}>
+              <title>{title}</title>
+              {st === "active" && (
+                <rect x={x - PW / 2 - 5} y={y - PH / 2 - 5} width={PW + 10} height={PH + 10} rx={14} fill="#facc15" className="rs-pulse" />
+              )}
+              <rect
+                x={x - PW / 2}
+                y={y - PH / 2}
+                width={PW}
+                height={PH}
+                rx={10}
+                fill={c.fill}
+                stroke={isNext ? "#facc15" : c.stroke}
+                strokeWidth={isNext || st === "active" ? 2.5 : 1.5}
+                strokeDasharray={isNext ? "5 4" : st === "pending" ? "3 3" : undefined}
+                className={isNext ? "rs-march" : ""}
+                style={{ transition: "fill .3s, stroke .3s" }}
+              />
+              <text x={x} y={y - 3} textAnchor="middle" fontSize="12" fontWeight="700" fill={c.text} fontFamily="ui-monospace, monospace">
+                {algo.short}({nd.n})
+              </text>
+              <text
+                x={x}
+                y={y + 12}
+                textAnchor="middle"
+                fontSize={st === "returned" ? 11.5 : 10}
+                fontWeight={st === "returned" ? 700 : 400}
+                fill={c.sub}
+                fontFamily="ui-monospace, monospace"
+              >
+                {st === "returned" ? `↩ ${val}` : isNext ? "siguiente" : c.label}
+              </text>
+            </g>
+          );
+        })}
+      </svg>
+    </div>
+  );
+}
+
+/* ─────────────────────────── Componente principal ─────────────────────────── */
+
+export default function RecursionSimulator() {
+  const [algoKey, setAlgoKey] = useState("fibonacci");
+  const [n, setN] = useState(ALGORITHMS.fibonacci.initial);
+  const [i, setI] = useState(0);
+  const [playing, setPlaying] = useState(false);
+  const [speed, setSpeed] = useState(1);
+  const [showFuture, setShowFuture] = useState(true);
+
+  const algo = ALGORITHMS[algoKey];
+  const trace = useMemo(() => buildTrace(algo, n), [algo, n]);
+  const last = trace.steps.length - 1;
+  const step = trace.steps[Math.min(i, last)];
+  const kind = KIND[step.kind];
+  const tone = TONE[kind.tone];
+  const KindIcon = kind.icon;
+
+  const reset = useCallback(() => {
+    setPlaying(false);
+    setI(0);
+  }, []);
+  const next = useCallback(() => {
+    setPlaying(false);
+    setI((x) => Math.min(x + 1, last));
+  }, [last]);
+  const prev = useCallback(() => {
+    setPlaying(false);
+    setI((x) => Math.max(x - 1, 0));
+  }, []);
+  const togglePlay = useCallback(() => {
+    if (playing) return setPlaying(false);
+    if (i >= last) setI(0);
+    setPlaying(true);
+  }, [playing, i, last]);
+
+  const chooseAlgo = (key) => {
+    const a = ALGORITHMS[key];
+    setAlgoKey(key);
+    setN((v) => Math.min(Math.max(v, a.min), a.max));
+    reset();
+  };
+  const chooseN = (v) => {
+    setN(v);
+    reset();
+  };
+
+  // Reproducción automática
+  useEffect(() => {
+    if (!playing) return;
+    if (i >= last) {
+      setPlaying(false);
+      return;
+    }
+    const t = setTimeout(() => setI((x) => Math.min(x + 1, last)), 900 / speed);
+    return () => clearTimeout(t);
+  }, [playing, i, last, speed]);
+
+  // Atajos de teclado
+  useEffect(() => {
+    const onKey = (e) => {
+      const tag = e.target.tagName;
+      if (tag === "INPUT" || tag === "SELECT" || tag === "TEXTAREA") return;
+      if (e.key === "ArrowRight") {
+        e.preventDefault();
+        next();
+      } else if (e.key === "ArrowLeft") {
+        e.preventDefault();
+        prev();
+      } else if (e.key === " ") {
+        e.preventDefault();
+        togglePlay();
+      } else if (e.key.toLowerCase() === "r") {
+        reset();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [next, prev, togglePlay, reset]);
+
+  // Llamadas repetidas: nodos ya visitados cuyo n ya se había calculado antes
+  const visited = trace.nodes.filter((nd) => step.status[nd.id] !== "pending");
+  const repeated = visited.length - new Set(visited.map((nd) => nd.n)).size;
+
+  return (
+    <div className="min-h-screen overflow-x-hidden bg-slate-950 text-slate-100 antialiased">
+      <style>{`
+        @keyframes rs-pulse { 0%,100% { opacity: .12 } 50% { opacity: .4 } }
+        .rs-pulse { animation: rs-pulse 1.4s ease-in-out infinite }
+        @keyframes rs-march { to { stroke-dashoffset: -18 } }
+        .rs-march { animation: rs-march .8s linear infinite }
+        @keyframes rs-in { from { opacity: 0; transform: translateY(-8px) scale(.97) } to { opacity: 1; transform: none } }
+        .rs-in { animation: rs-in .25s ease-out }
+      `}</style>
+
+      <div className="mx-auto max-w-[1400px] space-y-4 p-4 sm:p-6">
+        {/* Encabezado */}
+        <header className="flex flex-wrap items-end justify-between gap-4">
+          <div>
+            <h1 className="text-2xl font-bold tracking-tight">
+              Simulador de <span className="text-yellow-400">Recursividad</span>
+            </h1>
+            <p className="mt-1 max-w-xl text-sm text-slate-400">
+              <span className="font-mono text-slate-300">{algo.formula}</span> — {algo.blurb}
+            </p>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-3">
+            <div className="flex rounded-xl border border-slate-700 bg-slate-900 p-1">
+              {Object.entries(ALGORITHMS).map(([key, a]) => (
+                <button
+                  key={key}
+                  type="button"
+                  onClick={() => chooseAlgo(key)}
+                  className={`rounded-lg px-3 py-1.5 text-sm font-medium transition ${
+                    key === algoKey ? "bg-slate-100 text-slate-900" : "text-slate-400 hover:text-slate-100"
+                  }`}
+                >
+                  {a.label}
+                </button>
+              ))}
+            </div>
+            <label className="flex items-center gap-2 rounded-xl border border-slate-700 bg-slate-900 px-3 py-1.5 text-sm">
+              <span className="text-slate-400">n =</span>
+              <input
+                type="range"
+                min={algo.min}
+                max={algo.max}
+                value={n}
+                onChange={(e) => chooseN(Number(e.target.value))}
+                className="w-24 accent-yellow-400"
+                aria-label="Valor de n"
+              />
+              <span className="w-4 text-center font-mono font-semibold text-yellow-300">{n}</span>
+            </label>
+          </div>
+        </header>
+
+        {/* Controles */}
+        <div className="flex flex-wrap items-center gap-2 rounded-2xl border border-slate-800 bg-slate-900/70 p-3">
+          <Tip text="Reiniciar (R)">
+            <CtrlButton onClick={reset}>
+              <RotateCcw className="h-4 w-4" />
+              <span className="hidden sm:inline">Reiniciar</span>
+            </CtrlButton>
+          </Tip>
+          <Tip text="Paso anterior (←)">
+            <CtrlButton onClick={prev} disabled={i === 0}>
+              <ChevronLeft className="h-4 w-4" />
+              <span className="hidden sm:inline">Anterior</span>
+            </CtrlButton>
+          </Tip>
+          <Tip text="Reproducción automática (Espacio)">
+            <CtrlButton onClick={togglePlay} primary>
+              {playing ? <Pause className="h-4 w-4" /> : <Play className="h-4 w-4" />}
+              <span className="w-[72px] text-left">{playing ? "Pausar" : "Reproducir"}</span>
+            </CtrlButton>
+          </Tip>
+          <Tip text="Siguiente paso (→)">
+            <CtrlButton onClick={next} disabled={i === last}>
+              <span className="hidden sm:inline">Siguiente</span>
+              <ChevronRight className="h-4 w-4" />
+            </CtrlButton>
+          </Tip>
+
+          <div className="ml-1 flex rounded-xl border border-slate-700 bg-slate-800 p-0.5 text-xs">
+            {SPEEDS.map((s) => (
+              <button
+                key={s}
+                type="button"
+                onClick={() => setSpeed(s)}
+                className={`rounded-lg px-2 py-1.5 font-mono transition ${
+                  s === speed ? "bg-slate-200 text-slate-900" : "text-slate-400 hover:text-slate-100"
+                }`}
+              >
+                {s}×
+              </button>
+            ))}
+          </div>
+
+          <div className="flex min-w-[200px] flex-1 items-center gap-3 px-2">
+            <input
+              type="range"
+              min={0}
+              max={last}
+              value={Math.min(i, last)}
+              onChange={(e) => {
+                setPlaying(false);
+                setI(Number(e.target.value));
+              }}
+              className="w-full accent-yellow-400"
+              aria-label="Línea de tiempo de pasos"
+            />
+            <span className="shrink-0 font-mono text-xs text-slate-400">
+              {Math.min(i, last)}/{last}
+            </span>
+          </div>
+        </div>
+
+        {/* Explicación del paso + estadísticas */}
+        <div className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_auto]">
+          <div className={`flex gap-3 rounded-2xl border bg-slate-900/70 p-4 transition-colors ${tone.ring}`}>
+            <div className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-xl ${tone.badge}`}>
+              <KindIcon className="h-5 w-5" />
+            </div>
+            <div className="min-w-0">
+              <div className="flex flex-wrap items-center gap-2">
+                <span className={`rounded-md px-2 py-0.5 text-[11px] font-semibold uppercase tracking-wider ${tone.badge}`}>
+                  {kind.label}
+                </span>
+                <h3 className="font-mono text-base font-semibold text-slate-100">{step.title}</h3>
+              </div>
+              <p className="mt-1 text-sm text-slate-300">{step.detail}</p>
+              <p className="mt-2 flex items-start gap-1.5 text-xs text-slate-500">
+                <Lightbulb className="mt-px h-3.5 w-3.5 shrink-0 text-yellow-500/70" />
+                {kind.tip}
+              </p>
+            </div>
+          </div>
+          <div className="grid grid-cols-2 gap-2 sm:grid-cols-4 lg:grid-cols-2 xl:grid-cols-4">
+            <Stat label="Llamadas" value={step.calls} tip="Cuántas veces se ha invocado la función hasta este paso." />
+            <Stat
+              label="Profundidad"
+              value={`${step.stack.length}/${step.maxDepth}`}
+              tip="Marcos en la pila ahora / máximo alcanzado. Cada nivel consume memoria."
+            />
+            {algoKey === "fibonacci" ? (
+              <Stat
+                label="Repetidas"
+                value={repeated}
+                accent={repeated ? "text-orange-300" : "text-slate-100"}
+                tip="Llamadas con un n que ya se había calculado antes. La memoización evitaría este trabajo duplicado."
+              />
+            ) : (
+              <Stat label="Repetidas" value="0" tip="El factorial nunca repite subproblemas: cada n se calcula una sola vez." />
+            )}
+            <Stat
+              label="Resultado"
+              value={step.kind === "done" ? trace.result : "…"}
+              accent="text-emerald-300"
+              tip={`El valor final de ${algo.fn}(${n}) aparece cuando la primera llamada retorna.`}
+            />
+          </div>
+        </div>
+
+        {/* Paneles principales */}
+        <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(0,1.7fr)_minmax(0,0.95fr)]">
+          <div className="flex min-w-0 flex-col gap-4">
+            <Panel icon={Code} title="Código" tip="La línea resaltada es la que se ejecuta en este paso. Los puntos azules marcan dónde hay llamadas en espera.">
+              <CodePanel algo={algo} step={step} />
+            </Panel>
+            <Panel icon={Info} title="Estado de la llamada" tip="Parámetros y variables locales del marco que está en la cima de la pila.">
+              <VariablesPanel algo={algo} step={step} />
+            </Panel>
+          </div>
+
+          <Panel
+            icon={GitBranch}
+            title="Árbol de recursión"
+            tip="Cada nodo es una llamada; sus hijos son las llamadas que hace. Pasa el cursor sobre un nodo para ver su estado."
+            right={
+              <button
+                type="button"
+                onClick={() => setShowFuture((v) => !v)}
+                className="inline-flex items-center gap-1.5 rounded-lg border border-slate-700 px-2 py-1 text-xs text-slate-300 hover:bg-slate-800"
+              >
+                {showFuture ? <Eye className="h-3.5 w-3.5" /> : <EyeOff className="h-3.5 w-3.5" />}
+                {showFuture ? "Ocultar futuras" : "Mostrar futuras"}
+              </button>
+            }
+          >
+            <RecursionTree algo={algo} nodes={trace.nodes} step={step} showFuture={showFuture} />
+            <div className="mt-3 flex flex-wrap gap-x-4 gap-y-2 text-xs text-slate-400">
+              {LEGEND.map((l) => (
+                <Tip key={l.key} text={l.tip}>
+                  <span className="inline-flex cursor-help items-center gap-1.5">
+                    <span className={`h-2.5 w-2.5 rounded-full ${l.dot}`} />
+                    {l.label}
+                  </span>
+                </Tip>
+              ))}
+            </div>
+          </Panel>
+
+          <Panel
+            icon={Layers}
+            title="Pila de llamadas"
+            tip="Cada llamada apila un marco arriba; al retornar se desapila. Solo la cima se ejecuta (LIFO)."
+          >
+            <CallStack algo={algo} step={step} />
+          </Panel>
+        </div>
+
+        <footer className="pb-2 text-center text-xs text-slate-600">
+          Atajos: <kbd className="font-mono text-slate-400">←</kbd> / <kbd className="font-mono text-slate-400">→</kbd> pasos ·{" "}
+          <kbd className="font-mono text-slate-400">Espacio</kbd> reproducir · <kbd className="font-mono text-slate-400">R</kbd> reiniciar
+        </footer>
+      </div>
+    </div>
+  );
+}
